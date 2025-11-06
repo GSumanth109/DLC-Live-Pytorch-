@@ -1,0 +1,5 @@
+PyQt5==5.15.11
+opencv-python==4.10.0.84
+psutil==6.0.0
+numpy==1.26.4
+PyYAML
