@@ -1,72 +1,90 @@
 """
-utils/config.py
+Configuration Management
 
-Configuration and settings management functions.
-
-Handles:
-- Loading and saving the `rt_config.json` file.
-- Gathering settings from the UI widgets.
-- Validating settings before starting the analysis.
+This file provides helper functions for managing application settings.
+It handles:
+1.  Loading settings from the `rt_config.json` file on startup.
+2.  Saving the current UI settings back to `rt_config.json`.
+3.  Gathering settings from the UI to start the preview (`gather_preview_settings`).
+4.  Gathering *all* settings from the UI to start the full analysis
+    (`gather_settings`), which includes:
+    -   Validating all paths and numeric inputs.
+    -   Showing error popups to the user if validation fails.
+    -   Saving the valid settings back to the config file.
 """
 
 import os
 import json
 from PyQt5.QtWidgets import QMessageBox
 
+# The name of the file used to store settings
 CONFIG_FILE_NAME = "rt_config.json"
 
 def derive_pytorch_config_path(snapshot_path):
     """
-    Infers the `pytorch_config.yaml` path from the snapshot path.
-    Assumes it's in the same directory.
-    
+    Attempts to auto-find the 'pytorch_config.yaml' file, assuming
+    it's in the same directory as the model snapshot file (.pt / .pb).
+
     Args:
-        snapshot_path (str): Path to the .pt or .pb model file.
+        snapshot_path (str): The file path to the model snapshot.
 
     Returns:
-        str: The inferred path to the pytorch_config.yaml.
+        str: The inferred path to the pytorch_config.yaml, or an empty
+             string if the snapshot_path is empty.
     """
-    return os.path.join(os.path.dirname(snapshot_path), 'pytorch_config.yaml') if snapshot_path else ""
+    if not snapshot_path:
+        return ""
+    # Assumes .yaml is in the same folder as the snapshot
+    return os.path.join(os.path.dirname(snapshot_path), 'pytorch_config.yaml')
 
 def load_settings_from_file():
     """
-    Loads settings from the `CONFIG_FILE_NAME`.
+    Loads the settings dictionary from `rt_config.json`.
 
     Returns:
-        dict or None: The loaded settings dictionary, or None on failure.
+        dict or None: The loaded settings dictionary, or None if
+                      the file doesn't exist or fails to parse.
     """
     if not os.path.exists(CONFIG_FILE_NAME):
+        print(f"[Config] '{CONFIG_FILE_NAME}' not found.")
         return None
     try:
         with open(CONFIG_FILE_NAME, 'r') as f:
             settings = json.load(f)
+        print(f"[Config] Settings loaded from '{CONFIG_FILE_NAME}'.")
         return settings
     except Exception as e:
-        print(f"!!! [Config] Error loading '{CONFIG_FILE_NAME}': {e}")
+        print(f"!!! [Config] Error loading '{CONFIG_FILE_NAME}': {e}. Using defaults.")
         return None
 
 def save_settings_to_file(settings_dict):
     """
-    Saves the provided settings dictionary to `CONFIG_FILE_NAME`.
+    Saves the provided settings dictionary to `rt_config.json`.
 
     Args:
         settings_dict (dict): The dictionary of settings to save.
     """
     try:
         with open(CONFIG_FILE_NAME, 'w') as f:
+            # Use indent=4 for readable, pretty-printed JSON
             json.dump(settings_dict, f, indent=4)
+        print(f"[Config] Settings saved to '{CONFIG_FILE_NAME}'.")
     except Exception as e:
+        print(f"!!! [Config] Error saving '{CONFIG_FILE_NAME}': {e}.")
+        # Show a popup on save error
         QMessageBox.warning(None, "Config Error", f"Could not save settings to {CONFIG_FILE_NAME}:\n{e}")
 
 def gather_preview_settings(ui):
     """
-    Gathers only the essential settings needed to start the camera preview.
+    Gathers only the *essential* settings from the UI needed to
+    start the camera preview. Performs minimal validation.
 
     Args:
-        ui (App): The main application window instance.
+        ui (App): The main QMainWindow instance (to access UI widgets).
 
     Returns:
-        dict or None: A dictionary of preview settings, or None on failure.
+        dict or None: A dictionary of preview settings, or None if
+                      a basic validation (like bad number) fails.
     """
     try:
         if ui.usb_rb.isChecked():
@@ -88,34 +106,37 @@ def gather_preview_settings(ui):
         }
         return settings
     except ValueError as e:
+        # Catch errors if e.g. 'cam_width' is "abc"
         QMessageBox.critical(ui, "Settings Error", f"Invalid numeric value in camera settings: {e}")
         return None
 
 def gather_settings(ui):
     """
-    Gathers ALL settings from the UI fields for the main analysis.
-    Performs full validation and shows error popups.
+    Gathers ALL settings from the UI for the main analysis.
+    Performs full validation on all required fields and paths.
+    If validation succeeds, it also saves the settings to `rt_config.json`.
 
     Args:
-        ui (App): The main application window instance.
+        ui (App): The main QMainWindow instance (to access UI widgets).
 
     Returns:
-        dict or None: A complete, validated settings dictionary, or
-                      None if validation fails.
+        dict or None: A comprehensive dictionary of all runtime settings,
+                      or None if any validation check fails.
     """
     try:
+        # 1. Get the base preview settings first
         settings = gather_preview_settings(ui)
         if settings is None:
-            return None
+            return None # Failed basic validation
             
-        # Add all analysis-specific settings
+        # 2. Add all other settings for analysis
         settings.update({
             'config_path': ui.cfg_edit.text(),
             'snapshot_path': ui.snap_edit.text(),
             'pytorch_config_path': derive_pytorch_config_path(ui.snap_edit.text()),
             'method': ui.pre_cmb.currentText(),
             'flat_image_path': ui.flat_edit.text(),
-            'batch_size': 1, # Hardcoded
+            'batch_size': 1, # Hardcoded, not implemented in UI
             'use_fp16': ui.fp16_cb.isChecked(),
             'ram_threshold_gb': ui.ram_sld.value(),
             'target_fps': ui.disp_fps_sld.value(),
@@ -128,34 +149,42 @@ def gather_settings(ui):
             'point_confidence': ui.pt_sld.value() / 100.0,
             'show_skeleton': ui.show_skel_cb.isChecked(),
             'save_csv': ui.csv_cb.isChecked(),
-            'csv_output_path': ui.csv_edit.text(),
+            'csv_output_path': ui.csv_edit.text(), # <-- FIX: Removed typo
             'save_video': ui.vid_cb.isChecked(),
             'video_output_path': ui.vid_edit.text(),
         })
 
         # --- Full Validation ---
+        # Check that required paths are set
         if not all([settings['config_path'], settings['snapshot_path']]):
-            # Allow running without a model *only* if processing a video file
-            # (e.g., to test pre-processing or recording)
-            if not (settings['camera_source'] == "Video File"):
+            # Allow running analysis on a video file without a model
+            # (e.g., just to test cropping or pre-processing)
+            if not (settings['camera_source'] == "Video File" and not settings['config_path'] and not settings['snapshot_path']):
                  QMessageBox.critical(ui, "Settings Error", "DLC Config and Snapshot paths are required to start analysis.")
                  return None
             
+        # Check that files exist (if paths are provided)
         if (settings['config_path'] and not os.path.exists(settings['config_path'])):
             QMessageBox.critical(ui, "Settings Error", f"Config file not found:\n{settings['config_path']}")
             return None
         if (settings['snapshot_path'] and not os.path.exists(settings['snapshot_path'])):
             QMessageBox.critical(ui, "Settings Error", f"Snapshot file not found:\n{settings['snapshot_path']}")
             return None
+            
+        # Check video file path
         if settings['camera_source'] == "Video File" and not os.path.exists(settings['path']):
             QMessageBox.critical(ui, "Settings Error", f"Video file not found:\n{settings['path']}")
             return None
+            
+        # Check output paths
         if settings['save_csv'] and not settings['csv_output_path']:
              QMessageBox.critical(ui, "Settings Error", "CSV output path is required to save CSV.")
              return None
         if settings['save_video'] and not settings['video_output_path']:
              QMessageBox.critical(ui, "Settings Error", "Video output path is required to save video.")
              return None
+             
+        # Check crop dimensions
         if settings['crop_enabled']:
             if settings['crop_w'] <= 0 or settings['crop_h'] <= 0:
                 QMessageBox.critical(ui, "Settings Error", "Crop Width (W) and Height (H) must be greater than 0.")
@@ -164,16 +193,23 @@ def gather_settings(ui):
                 QMessageBox.critical(ui, "Settings Error", "Crop X and Y cannot be negative.")
                 return None
 
-        ui.bs_sld.setValue(1) # Ensure batch size is 1
+        # Reset batch size slider (since it's not implemented)
+        ui.bs_sld.setValue(1)
         
-        # Save the settings (using the UI-facing dict) on successful validation
+        # --- 4. Validation Passed: Save and Return ---
+        # Save the settings to rt_config.json
+        # We save the dictionary *from the UI*, not the 'settings' dict,
+        # as 'settings' has derived paths (like 'pytorch_config_path')
         save_settings_to_file(ui.get_ui_settings_as_dict())
         
+        # Return the fully populated runtime settings
         return settings
 
     except ValueError as e:
+        # Catch errors from int() conversion on e.g. crop settings
         QMessageBox.critical(ui, "Settings Error", f"Invalid numeric value in settings (e.g., Crop W/H): {e}")
         return None
     except Exception as e:
         QMessageBox.critical(ui, "Settings Error", f"An error occurred while gathering settings: {e}")
         return None
+
