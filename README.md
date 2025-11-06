@@ -53,37 +53,52 @@ This application was built to assist researchers in using the Advanced DeepLabCu
 
 The application's high performance and stability are achieved through a decoupled, multi-process architecture. This isolates resource-intensive tasks (like model inference) from the main GUI thread, preventing freezes and crashes.
 
-The system's most critical feature is its **automatic memory-leak mitigation**, visualized below.
+The system's core logic, including its **automatic memory-leak mitigation**, is visualized below:
 
 ```mermaid
 graph TD
-    subgraph Main GUI Process
-        A[VideoProcessingThread] -->|Overwrites frame| B("FrameHandoff_A [maxsize=1]")
-        A -.->|Hot-Swapped| B2("FrameHandoff_B [maxsize=1]")
-        
+    subgraph "Main GUI Process (Threads)"
+        direction LR
         D[InferenceProcessManager]
+        A[VideoProcessingThread]
+        F[GuiUpdateWorker]
+        G[Main GUI Thread]
         
-        C(ResultsQueue) --> F[GuiUpdateWorker]
-        F -->|Most Recent Frame| G(Main GUI Thread)
+        D -.->|Controls| A
+        D -.->|Monitors RAM| E
+        D -.->|Monitors RAM| E2
+        F --> G
     end
     
-    subgraph Dedicated Inference Process A (Active)
-        B --> E[Inference_A (Model)]
-        E -->|Results| C
+    subgraph "Dedicated Inference Process A (Active)"
+        B("FrameHandoff A [maxsize=1]") --> E[Inference A (Model)]
     end
     
-    subgraph Dedicated Inference Process B (Standby)
-        B2 --> E2[Inference_B (Model)]
-        E2 -->|Results| C
+    subgraph "Dedicated Inference Process B (Standby)"
+        B2("FrameHandoff B [maxsize=1]") --> E2[Inference B (Model)]
     end
 
-    %% Hot-Swap Logic
-    D -.->|1. Monitors RAM| E
-    D -- 2. Detects High RAM --> D
-    D -- 3. Starts --> E2
-    D -- 4. Swaps Video Feed --> A
-    D -- 5. Stops --> E
+    C(Shared ResultsQueue)
+
+    A -->|Frame Data| B
+    A -.->|Hot-Swapped to| B2
+    
+    E -->|Results| C
+    E2 -->|Results| C
+    
+    C --> F
 ```
+
+### How It Works:
+
+1.  **`VideoProcessingThread` (A):** Runs in the main process, capturing frames from the camera. It puts the latest frame into the active **`FrameHandoff A` (B)**.
+2.  **`InferenceProcess A` (E):** A **completely separate process** that reads from `Handoff A`, runs the model, and puts the results (frame + keypoints) into the shared **`ResultsQueue` (C)**.
+3.  **`GuiUpdateWorker` (F):** Reads from the `ResultsQueue`, skips any stale (old) frames, and sends only the newest one to the **`Main GUI Thread` (G)** for display.
+4.  **`InferenceProcessManager` (D):** This is the "brain." It runs in the main process and constantly:
+    * **Monitors the RAM** of `InferenceProcess A` (E).
+    * If RAM gets too high, it starts a new, clean **`InferenceProcess B` (E2)**.
+    * Once `Process B` is ready, the Manager **redirects the `VideoProcessingThread` (A)** to send new frames to **`FrameHandoff B` (B2)** instead.
+    * It then safely terminates the old `Process A`. This is the "hot-swap."
 
 ---
 
