@@ -58,8 +58,8 @@ The system's most critical feature is its **automatic memory-leak mitigation**, 
 ```mermaid
 graph TD
     subgraph Main GUI Process
-        A[VideoProcessingThread] -->|Overwrites frame| B(FrameHandoff_A [maxsize=1])
-        A -.->|Hot-Swapped| B2(FrameHandoff_B [maxsize=1])
+        A[VideoProcessingThread] -->|Overwrites frame| B("FrameHandoff_A [maxsize=1]")
+        A -.->|Hot-Swapped| B2("FrameHandoff_B [maxsize=1]")
         
         D[InferenceProcessManager]
         
@@ -143,7 +143,7 @@ If it prints **True**, your GPU installation is working. If it prints **False**,
 Clone the DLC-Live-Pytorch repository:
 
 ```bash
-git clone https://github.com/GSumanth109/DLC-Live-Pytorch-.git
+git clone [https://github.com/GSumanth109/DLC-Live-Pytorch-.git](https://github.com/GSumanth109/DLC-Live-Pytorch-.git)
 cd DLC-Live-Pytorch-
 ```
 
@@ -219,7 +219,7 @@ All settings are configured from the panels on the left side of the application.
 | **1** | **Input Model** | Load the main DLC `config.yaml` and the `snapshot.pt` model file. |
 | **2** | **Source** | Select the input: "USB Webcam" (by index) or "Video File" (by path). |
 | **3** | **Cam Params** | Set camera properties (Width, Height, FPS). Click "Reload Source" to apply. |
-| **4**| **Realtime** | Sliders to adjust Exposure, Gain, and White Balance on-the-fly (USB cams only). |
+| **4** | **Realtime** | Sliders to adjust Exposure, Gain, and White Balance on-the-fly (USB cams only). |
 | **5** | **Cropping** | Enable and define a crop-box. This crops the image *before* sending it to the model. |
 | **6** | **Pre-processing** | Apply image processing *before* cropping (e.g., "Flat-field" correction). |
 | **7** | **Performance** | Tweak runtime settings: `RAM Rst` (RAM limit for hot-swap), `FP16` (for faster GPU inference), `Disp FPS` (GUI update rate). |
