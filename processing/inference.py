@@ -1,22 +1,8 @@
 """
-processing/inference.py
+The inference worker function.
+This runs in a separate process to perform DLC inference.
 
-Defines the `inference_worker` function.
-
-This is the core "work" function that runs in its own separate
-multiprocessing.Process. It is completely isolated from the main
-GUI application.
-
-It performs the following steps:
-1.  Initializes the DeepLabCut model (this is the slow part).
-2.  Initializes the CSV writer if requested.
-3.  Signals the `InferenceProcessManager` that it is "ready".
-4.  Enters a loop, waiting for frame packets from its `process_queue`.
-5.  Runs DLC inference on the frame.
-6.  Formats the results and writes them to the CSV file.
-7.  Puts the full data packet (with predictions) into the
-    `results_queue` for the GUI to pick up.
-8.  Cleans up GPU memory on exit.
+(This file is based on the original modular project structure.)
 """
 
 import os
@@ -26,32 +12,20 @@ import numpy as np
 import torch
 import gc
 import csv
-import traceback
 from deeplabcut.pose_estimation_pytorch import get_pose_inference_runner
 from deeplabcut.core.config import read_config_as_dict
+# *** MODIFIED: Import torch.amp for the new autocast syntax ***
+import torch.amp 
 
 def inference_worker(settings, process_queue, results_queue, shutdown_event, ready_event, processed_counter, csv_counter):
     """
     The target function for the dedicated inference process.
-    
     - Initializes the DLC model.
     - Initializes the CSV writer.
-    - Enters a loop, getting frames from `process_queue`.
+    - Enters a loop, getting frames from process_queue.
     - Runs inference.
     - Writes results to CSV.
-    - Puts results packet into `results_queue`.
-
-    Args:
-        settings (dict): The main application settings.
-        process_queue (mp.Queue): The *input* queue for this specific
-                                  process (maxsize=1).
-        results_queue (mp.Queue): The *output* queue, shared by all
-                                  processes, feeding the GUI.
-        shutdown_event (mp.Event): The event to signal this process to stop.
-        ready_event (mp.Event): The event this process sets when its
-                                model is loaded and it's ready to work.
-        processed_counter (mp.Value): Shared counter for processed frames.
-        csv_counter (mp.Value): Shared counter for CSV rows written.
+    - Puts results packet into results_queue.
     """
     pose_runner = None
     csv_writer = None
@@ -59,31 +33,40 @@ def inference_worker(settings, process_queue, results_queue, shutdown_event, rea
     frame_idx = 0
     worker_pid = os.getpid() # Get PID for logging/monitoring
     
+    # Store device and fp16 status for use in the loop
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    use_fp16 = settings['use_fp16'] and device == "cuda"
+    
     try:
-        # --- 1. Initialize Model ---
+        print(f"[Proc-{worker_pid}] Initializing model...")
+        
+        # Load DLC model configuration
         model_cfg = read_config_as_dict(settings['pytorch_config_path'])
         
-        # Infer method (TopDown/BottomUp) if not present
+        # Infer method (TopDown/BottomUp) if not present in pytorch_config.yaml
         if 'method' not in model_cfg:
             main_cfg = read_config_as_dict(settings['config_path'])
             model_cfg['method'] = 'BottomUp' if not main_cfg.get('multianimalproject') else 'TopDown'
             
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Get the pose runner (inference engine)
         pose_runner = get_pose_inference_runner(
             model_config=model_cfg,
             snapshot_path=settings['snapshot_path'],
             device=device
         )
+        print(f"[Proc-{worker_pid}] Model loaded on {device}.")
         
-        # Apply FP16 (half precision) if requested
-        if settings['use_fp16'] and device == "cuda":
+        if use_fp16:
             try:
                 pose_runner.model.half()
+                print(f"[Proc-{worker_pid}] Model set to FP16 (half-precision).")
             except Exception as e:
                 print(f"!!! [Proc-{worker_pid}] WARN: Could not set FP16: {e}")
 
-        # --- 2. Initialize CSV Writer ---
+        # Initialize CSV file if requested
         if settings['save_csv']:
+            print(f"[Proc-{worker_pid}] Initializing CSV: {settings['csv_output_path']}")
+            
             # Build CSV header
             header = ['timestamp', 'frame_index', 'capture_to_csv_ms', 'inference_ms']
             bodyparts = read_config_as_dict(settings['config_path'])['bodyparts']
@@ -94,18 +77,20 @@ def inference_worker(settings, process_queue, results_queue, shutdown_event, rea
             csv_writer = csv.writer(csv_file)
             csv_writer.writerow(header)
 
-        # --- 3. Signal Ready ---
-        ready_event.set() 
+        print(f"[Proc-{worker_pid}] Model ready.");
+        ready_event.set() # Signal to manager that we are ready
         
     except Exception as e:
-        # If init fails, print error and exit process
         print(f"!!! [Proc-{worker_pid}] CRITICAL INIT ERROR: {e}")
+        import traceback
         traceback.print_exc()
         if csv_file:
             csv_file.close()
-        return # Exit process
+        return # Exit process if init fails
 
-    # --- 4. Main Inference Loop ---
+    # --- Main Inference Loop ---
+    print(f"[Proc-{worker_pid}] Entering main inference loop...")
+    
     while not shutdown_event.is_set():
         try:
             packet = None
@@ -113,7 +98,7 @@ def inference_worker(settings, process_queue, results_queue, shutdown_event, rea
                 # Wait for a frame packet from the queue
                 packet = process_queue.get(timeout=0.1) # 100ms timeout
                 packet['timestamps']['dequeued_for_inference'] = time.monotonic()
-            except Exception: # queue.Empty
+            except Exception: # queue.Empty or timeout
                 if shutdown_event.is_set():
                     break # Exit loop if shutdown is requested
                 continue # No frame ready, loop again
@@ -121,9 +106,18 @@ def inference_worker(settings, process_queue, results_queue, shutdown_event, rea
             # Convert BGR (OpenCV) to RGB (DLC Model)
             rgb_frame = cv2.cvtColor(packet['processed_frame'], cv2.COLOR_BGR2RGB)
 
-            # --- 5. Run Inference ---
+            # --- Run Inference ---
             inf_start = time.monotonic()
-            predictions = pose_runner.inference(images=[rgb_frame])
+            
+            # *** REVERTED FP16 FIX ***
+            # We go back to calling pose_runner.inference() directly,
+            # as your DLC version does not have .preprocess()
+            
+            # *** UPDATED SYNTAX to fix FutureWarning ***
+            # Use torch.amp.autocast with the modern syntax
+            with torch.amp.autocast(device_type=device, enabled=use_fp16):
+                predictions = pose_runner.inference(images=[rgb_frame])
+                
             inf_end = time.monotonic()
             inference_ms = (inf_end - inf_start) * 1000
 
@@ -132,7 +126,7 @@ def inference_worker(settings, process_queue, results_queue, shutdown_event, rea
             packet['inference_time_ms'] = inference_ms
             packet['timestamps']['inferred'] = inf_end
 
-            # --- 6. CSV Writing ---
+            # --- CSV Writing ---
             csv_write_time = time.monotonic()
             capture_to_csv_ms = (csv_write_time - packet['timestamps']['capture']) * 1000
             packet['capture_to_csv_ms'] = capture_to_csv_ms
@@ -147,12 +141,17 @@ def inference_worker(settings, process_queue, results_queue, shutdown_event, rea
                 keypoints = predictions[0]["bodyparts"]
                 
                 if keypoints is not None and keypoints.size > 0:
-                    if keypoints.ndim == 3: # Multi-animal (N, K, 3)
-                        # TODO: Handle multi-animal CSV format properly
+                    if keypoints.ndim == 3: # Multi-animal (N_animals, N_keypoints, 3)
+                        # Flatten for CSV, assumes 1 animal for now
+                        # TODO: Handle multi-animal CSV format properly if needed
                         kp_set = keypoints[0] # Just take first animal
-                        row.extend(kp_set.flatten())
-                    elif keypoints.ndim == 2: # Single animal (K, 3)
-                         row.extend(keypoints.flatten())
+                        for kp in kp_set:
+                            row.extend(kp)
+                    elif keypoints.ndim == 2 and keypoints.shape[1] == 3: # Single animal (N_keypoints, 3)
+                         for kp in keypoints:
+                            row.extend(kp)
+                    else:
+                        print(f"[Proc-{worker_pid}] Warn: Unexpected keypoints shape: {keypoints.shape}")
                 else:
                     # No keypoints found, fill with NaNs
                     num_bodyparts = len(read_config_as_dict(settings['config_path'])['bodyparts'])
@@ -161,7 +160,7 @@ def inference_worker(settings, process_queue, results_queue, shutdown_event, rea
                 csv_writer.writerow(row)
                 csv_counter.value += 1 # Increment shared counter
 
-            # --- 7. Send to GUI ---
+            # --- Send to GUI ---
             packet['timestamps']['enqueued_for_gui'] = time.monotonic()
             results_queue.put(packet) # This can block if GUI queue is full
             frame_idx += 1
@@ -169,14 +168,19 @@ def inference_worker(settings, process_queue, results_queue, shutdown_event, rea
 
         except Exception as e:
             if not shutdown_event.is_set():
+                # Log any crashes in the loop
                 print(f"!!! [Proc-{worker_pid}] CRASH in loop: {e}")
+                import traceback
                 traceback.print_exc()
             break # Exit loop on error
 
-    # --- 8. Cleanup ---
+    # --- Cleanup ---
+    print(f"[Proc-{worker_pid}] Cleaning up and shutting down...")
     del pose_runner
     if csv_file:
         csv_file.close()
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    print(f"[Proc-{worker_pid}] Stopped.")
+
