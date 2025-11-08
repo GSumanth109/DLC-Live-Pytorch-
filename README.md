@@ -101,7 +101,7 @@ Next, install **PyTorch** with GPU support (highly recommended). You must instal
 Example for **CUDA 11.3**:
 
 ```bash
-conda install pytorch cudatoolkit=11.3 -c pytorch
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
 ```
 
 ### Step 4: Install DeepLabCut with GUI Support
@@ -126,8 +126,7 @@ If it prints **True**, your GPU installation is working. If it prints **False**,
 Clone the DLC-Live-Pytorch repository:
 
 ```bash
-git clone [https://github.com/GSumanth109/DLC-Live-Pytorch-.git](https://github.com/GSumanth109/DLC-Live-Pytorch-.git)
-cd DLC-Live-Pytorch-
+git clone https://github.com/GSumanth109/DLC-Live-Pytorch-
 ```
 
 ### Step 7: Install Project-Specific Requirements
