@@ -127,6 +127,7 @@ Clone the DLC-Live-Pytorch repository:
 
 ```bash
 git clone https://github.com/GSumanth109/DLC-Live-Pytorch-
+cd DLC-Live-Pytorch-
 ```
 
 ### Step 7: Install Project-Specific Requirements
